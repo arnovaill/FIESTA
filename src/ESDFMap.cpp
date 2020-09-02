@@ -187,8 +187,10 @@ fiesta::ESDFMap::ESDFMap(Eigen::Vector3d origin, double resolution_, Eigen::Vect
 
   cout << grid_total_size_ << endl;
   occupancy_buffer_.resize(grid_total_size_);
-
   distance_buffer_.resize(grid_total_size_);
+  occupancy_buffer_ssc_.resize(grid_total_size_);
+  measured_.resize(grid_total_size_);
+
 //    distanceBufferNegative.resize(grid_total_size_);
 
   closest_obstacle_.resize(grid_total_size_);
@@ -197,7 +199,8 @@ fiesta::ESDFMap::ESDFMap(Eigen::Vector3d origin, double resolution_, Eigen::Vect
 
   std::fill(distance_buffer_.begin(), distance_buffer_.end(), (double) undefined_);
 //    std::fill(distanceBufferNegative.begin(), distanceBufferNegative.end(), (double) undefined_);
-
+  std::fill(occupancy_buffer_ssc_.begin(), occupancy_buffer_ssc_.end(), undefined_); 
+  std::fill(measured_.begin(), measured_.end(), undefined_);
   std::fill(occupancy_buffer_.begin(), occupancy_buffer_.end(), 0);
   std::fill(closest_obstacle_.begin(), closest_obstacle_.end(), Eigen::Vector3i(undefined_, undefined_, undefined_));
   std::fill(num_hit_.begin(), num_hit_.end(), 0);
@@ -232,16 +235,39 @@ bool fiesta::ESDFMap::CheckUpdate() {
 #endif
 }
 
+// function for external use
+void fiesta::ESDFMap::InsertQueueEsdf(Eigen::Vector3i point) {
+  insert_queue_.push(QueueElement{point, 0.0});
+}
+
+void fiesta::ESDFMap::DeleteQueueEsdf(Eigen::Vector3i point) {
+  delete_queue_.push(QueueElement{point,(double) infinity_});
+}
+
 bool fiesta::ESDFMap::UpdateOccupancy(bool global_map) {
 #ifdef PROBABILISTIC
-  cout << "Occupancy Update" << ' ' << occupancy_queue_.size() << '\t';
+  // cout << "Occupancy Update" << ' ' << occupancy_queue_.size() << '\t';
   while (!occupancy_queue_.empty()) {
+
     QueueElement xx = occupancy_queue_.front();
     occupancy_queue_.pop();
     int idx = Vox2Idx(xx.point_);
+    
+    // If we are here, voxel was measured
+    // Reset voxel state if was using SSC value before
+    // if (occupancy_from_ssc_[idx] == true){
+    //   occupancy_buffer_[idx] =0.0; 
+    //   occupancy_from_ssc_[idx] == false;
+      // distance_buffer_[idx] = undefined_;
+      // closest_obstacle_[idx] =  Eigen::Vector3i(undefined_, undefined_, undefined_);
+      // delete_queue_.push(QueueElement{xx.point_, (double) infinity_});
+    // }
+    
     int occupy = Exist(idx);
-    double log_odds_update = (num_hit_[idx] >= num_miss_[idx] - num_hit_[idx] ? prob_hit_log_ : prob_miss_log_);
 
+    double log_odds_update = (num_hit_[idx] >= num_miss_[idx] - num_hit_[idx] ? prob_hit_log_ : prob_miss_log_);
+    // cout << "log_odds_update:" << ' ' << log_odds_update << '\t';
+    // cout << "occupancy_buffer_ before update:" << ' ' << occupancy_buffer_[idx] << '\t';
     num_hit_[idx] = num_miss_[idx] = 0;
     if (distance_buffer_[idx] < 0) {
       distance_buffer_[idx] = infinity_;
@@ -265,6 +291,7 @@ bool fiesta::ESDFMap::UpdateOccupancy(bool global_map) {
     } else if (!Exist(idx) && occupy) {
       delete_queue_.push(QueueElement{xx.point_, (double) infinity_});
     }
+    // cout << "occupancy_buffer_ after update:" << ' ' << occupancy_buffer_[idx] << '\t';
   }
 #endif
   return !insert_queue_.empty() || !delete_queue_.empty();
@@ -274,7 +301,7 @@ void fiesta::ESDFMap::UpdateESDF() {
 //    clock_t startTime,endTime;
 //    startTime = clock();
 //    UpdateOccupancy();
-  cout << "Insert " << insert_queue_.size() << "\tDelete " << delete_queue_.size() << endl;
+  // cout << "Insert " << insert_queue_.size() << "\tDelete " << delete_queue_.size() << endl;
   while (!insert_queue_.empty()) {
     QueueElement xx = insert_queue_.front();
     insert_queue_.pop();
@@ -326,6 +353,12 @@ void fiesta::ESDFMap::UpdateESDF() {
         next_[obs_idx] = undefined_;
 
         distance_buffer_[obs_idx] = distance;
+
+        // ADDED BY ARNO FOR EXP3
+        // if ((measured_[idx] != undefined_) && (distance_buffer_[obs_idx] > 0)){
+        //   measured_[obs_idx] = 0;
+        // }
+
         if (distance < infinity_) {
           update_queue_.push(QueueElement{obs_vox, distance});
         }
@@ -356,6 +389,7 @@ void fiesta::ESDFMap::UpdateESDF() {
 
         if (distance_buffer_[idx] > tmp) {
           distance_buffer_[idx] = tmp;
+
           change = true;
           DeleteFromList(Vox2Idx(closest_obstacle_[idx]), idx);
 
@@ -391,8 +425,8 @@ void fiesta::ESDFMap::UpdateESDF() {
     }
   }
   total_time_ += times;
-  cout << "Expanding " << times << " nodes, with change_num = " << change_num << ", accumulator = " << total_time_
-       << endl;
+  // cout << "Expanding " << times << " nodes, with change_num = " << change_num << ", accumulator = " << total_time_
+  //      << endl;
 //    endTime = clock();
 //    cout << "Totle Time : " <<(double)(endTime - startTime) / CLOCKS_PER_SEC << "s" << endl;
 }
@@ -405,7 +439,7 @@ int fiesta::ESDFMap::SetOccupancy(Eigen::Vector3d pos, int occ) {
   }
 
   if (!PosInMap(pos)) {
-//        cout << "Not in map" << endl;
+       //cout << "Not in map" << endl;
     return undefined_;
   }
 
@@ -437,7 +471,7 @@ int fiesta::ESDFMap::SetOccupancy(Eigen::Vector3i vox, int occ) {
   return idx;
 #else
   if (occupancy_buffer_[idx] != occ && occupancy_buffer_[idx] != (occ | 2)) {
-//        cout << occupancy_buffer_[idx] << "\t" << occ << endl;
+      //  cout << occupancy_buffer_[idx] << "\t" << occ << endl;
       if (occ == 1) insert_queue_.push(QueueElement{vox, 0.0});
       else delete_queue_.push(QueueElement{vox, (double)infinity_});
   }
@@ -541,9 +575,14 @@ double fiesta::ESDFMap::GetDistWithGradTrilinear(Eigen::Vector3d pos,
 
 // region VISUALIZATION
 
-void fiesta::ESDFMap::GetPointCloud(sensor_msgs::PointCloud &m, int vis_lower_bound, int vis_upper_bound) {
-  m.header.frame_id = "world";
-  m.points.clear();
+void fiesta::ESDFMap::GetPointClouds(sensor_msgs::PointCloud &occ_pc, sensor_msgs::PointCloud &free_pc, int vis_lower_bound, int vis_upper_bound) {
+// function modified to get free voxels as well
+
+  occ_pc.header.frame_id = "world";
+  occ_pc.points.clear();
+  free_pc.header.frame_id = "world";
+  free_pc.points.clear(); 
+
 #ifdef HASH_TABLE
   for (int i = 1; i < count; i++) {
     if (!Exist(Vox2Idx(vox_buffer_[i])) || vox_buffer_[i].z() < vis_lower_bound || vox_buffer_[i].z() > vis_upper_bound
@@ -565,21 +604,76 @@ void fiesta::ESDFMap::GetPointCloud(sensor_msgs::PointCloud &m, int vis_lower_bo
   for (int x = min_vec_(0); x <= max_vec_(0); ++x)
     for (int y = min_vec_(1); y <= max_vec_(1); ++y)
       for (int z = min_vec_(2); z <= max_vec_(2); ++z) {
-        if (!Exist(Vox2Idx(Eigen::Vector3i(x, y, z))) || z < vis_lower_bound || z > vis_upper_bound)
-          continue;
+        if (Exist(Vox2Idx(Eigen::Vector3i(x, y, z))) && z > vis_lower_bound && z < vis_upper_bound){ // if in boundary and occupied point
 
-        Eigen::Vector3d pos;
-        Vox2Pos(Eigen::Vector3i(x, y, z), pos);
+          Eigen::Vector3d pos;
+          Vox2Pos(Eigen::Vector3i(x, y, z), pos);
 
-        geometry_msgs::Point32 p;
-        p.x = pos(0);
-        p.y = pos(1);
-        p.z = pos(2);
-        m.points.push_back(p);
+          geometry_msgs::Point32 p;
+          p.x = pos(0);
+          p.y = pos(1);
+          p.z = pos(2);
+          occ_pc.points.push_back(p); 
+
+        }
+        if ((distance_buffer_[Vox2Idx(Eigen::Vector3i(x, y, z))] > 0.0) && (distance_buffer_[Vox2Idx(Eigen::Vector3i(x, y, z))] != infinity_) && z > vis_lower_bound && z < vis_upper_bound){ // if free and in boundary
+
+
+          Eigen::Vector3d pos;
+          Vox2Pos(Eigen::Vector3i(x, y, z), pos);
+          geometry_msgs::Point32 p;
+          p.x = pos(0);
+          p.y = pos(1);
+          p.z = pos(2);
+          free_pc.points.push_back(p);
+
+        }
       }
 //    cout << m.points.size() << endl;
 #endif
 }
+
+// void fiesta::ESDFMap::GetPointCloud(sensor_msgs::PointCloud &m, int vis_lower_bound, int vis_upper_bound) {
+// // function modified to get free voxels as well
+
+//   m.header.frame_id = "world";
+//   m.points.clear();
+// #ifdef HASH_TABLE
+//   for (int i = 1; i < count; i++) {
+//     if (!Exist(Vox2Idx(vox_buffer_[i])) || vox_buffer_[i].z() < vis_lower_bound || vox_buffer_[i].z() > vis_upper_bound
+//         || vox_buffer_[i].x() < min_vec_(0) || vox_buffer_[i].x() > max_vec_(0)
+//         || vox_buffer_[i].y() < min_vec_(1) || vox_buffer_[i].y() > max_vec_(1))
+//       continue;
+
+//     Eigen::Vector3d pos;
+//     Vox2Pos(Eigen::Vector3i(vox_buffer_[i]), pos);
+
+//     geometry_msgs::Point32 p;
+//     p.x = pos(0);
+//     p.y = pos(1);
+//     p.z = pos(2);
+//     m.points.push_back(p);
+//     //        cnt++;
+//   }
+// #else
+//   for (int x = min_vec_(0); x <= max_vec_(0); ++x)
+//     for (int y = min_vec_(1); y <= max_vec_(1); ++y)
+//       for (int z = min_vec_(2); z <= max_vec_(2); ++z) {
+//         if (!Exist(Vox2Idx(Eigen::Vector3i(x, y, z))) || z < vis_lower_bound || z > vis_upper_bound) // if not in boundary or not occupied skip point
+//           continue;
+
+//         Eigen::Vector3d pos;
+//         Vox2Pos(Eigen::Vector3i(x, y, z), pos);
+
+//         geometry_msgs::Point32 p;
+//         p.x = pos(0);
+//         p.y = pos(1);
+//         p.z = pos(2);
+//         m.points.push_back(p);
+//       }
+// //    cout << m.points.size() << endl;
+// #endif
+// }
 
 inline std_msgs::ColorRGBA RainbowColorMap(double h) {
   std_msgs::ColorRGBA color;

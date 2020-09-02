@@ -122,7 +122,10 @@ void Raycast(const Eigen::Vector3d &start, const Eigen::Vector3d &end,
 
             dist = (Eigen::Vector3d(x, y, z) - start).squaredNorm();
 
-            if (dist > maxDist) return;
+            if (dist > maxDist){
+                //std::cout << "COUCOU"<< dx << dy << dz << std::endl;
+                return;
+            } 
 
             if (output->size() > 1500) {
                 std::cerr << "Error, too many racyast voxels." << std::endl;

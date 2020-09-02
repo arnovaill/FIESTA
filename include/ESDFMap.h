@@ -44,8 +44,7 @@ class ESDFMap {
     }
   };
 
-
- private:
+ public:
   // parameters & method for occupancy information updating
   double prob_hit_log_, prob_miss_log_, clamp_min_log_, clamp_max_log_, min_occupancy_log_;
   const double Logit(const double &x) const;
@@ -80,6 +79,12 @@ class ESDFMap {
 #endif
 
 // data are saved in vector
+
+// Keep track of predicted voxels by SSC 
+std::vector<double> occupancy_buffer_ssc_;
+// Was voxel measured? 
+std::vector<int> measured_;
+
 #ifdef PROBABILISTIC
   std::vector<double> occupancy_buffer_;  // 0 is free, 1 is occupied
 #else
@@ -108,7 +113,7 @@ class ESDFMap {
   void DeleteFromList(int link, int idx);
   void InsertIntoList(int link, int idx);
 
- public:
+ //public:
 #ifdef HASH_TABLE
   ESDFMap(Eigen::Vector3d origin, double resolution, int reserve_size = 0);
 #else
@@ -129,6 +134,10 @@ class ESDFMap {
   bool UpdateOccupancy(bool global_map);
   void UpdateESDF();
 
+// Functions for custom ESDF update
+  void InsertQueueEsdf(Eigen::Vector3i point);
+  void DeleteQueueEsdf(Eigen::Vector3i point);
+
 // Occupancy Management
   int SetOccupancy(Eigen::Vector3d pos, int occ);
   int SetOccupancy(Eigen::Vector3i vox, int occ);
@@ -141,7 +150,7 @@ class ESDFMap {
   double GetDistWithGradTrilinear(Eigen::Vector3d pos, Eigen::Vector3d &grad);
 
 // Visualization
-  void GetPointCloud(sensor_msgs::PointCloud &m, int vis_lower_bound, int vis_upper_bound);
+  void GetPointClouds(sensor_msgs::PointCloud &occ_pc, sensor_msgs::PointCloud &free_pc, int vis_lower_bound, int vis_upper_bound);
   void GetSliceMarker(visualization_msgs::Marker &m, int slice, int id, Eigen::Vector4d color, double max_dist);
 
 // Local Range

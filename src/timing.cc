@@ -177,33 +177,33 @@ void Timing::Print(std::ostream& out) {
     return;
   }
 
-  out << "SM Timing\n";
-  out << "-----------\n";
-  for (typename map_t::value_type t : tagMap) {
-    size_t i = t.second;
-    out.width((std::streamsize)Instance().maxTagLength_);
-    out.setf(std::ios::left, std::ios::adjustfield);
-    out << t.first << "\t";
-    out.width(7);
+  // out << "SM Timing\n";
+  // out << "-----------\n";
+  // for (typename map_t::value_type t : tagMap) {
+  //   size_t i = t.second;
+  //   out.width((std::streamsize)Instance().maxTagLength_);
+  //   out.setf(std::ios::left, std::ios::adjustfield);
+  //   out << t.first << "\t";
+  //   out.width(7);
 
-    out.setf(std::ios::right, std::ios::adjustfield);
-    out << GetNumSamples(i) << "\t";
-    if (GetNumSamples(i) > 0) {
-      out << SecondsToTimeString(GetTotalSeconds(i)) << "\t";
-      double meansec = GetMeanSeconds(i);
-      double stddev = sqrt(GetVarianceSeconds(i));
-      out << "(" << SecondsToTimeString(meansec) << " +- ";
-      out << SecondsToTimeString(stddev) << ")\t";
+  //   out.setf(std::ios::right, std::ios::adjustfield);
+  //   out << GetNumSamples(i) << "\t";
+  //   if (GetNumSamples(i) > 0) {
+  //     out << SecondsToTimeString(GetTotalSeconds(i)) << "\t";
+  //     double meansec = GetMeanSeconds(i);
+  //     double stddev = sqrt(GetVarianceSeconds(i));
+  //     out << "(" << SecondsToTimeString(meansec) << " +- ";
+  //     out << SecondsToTimeString(stddev) << ")\t";
 
-      double minsec = GetMinSeconds(i);
-      double maxsec = GetMaxSeconds(i);
+  //     double minsec = GetMinSeconds(i);
+  //     double maxsec = GetMaxSeconds(i);
 
-      // The min or max are out of bounds.
-      out << "[" << SecondsToTimeString(minsec) << ","
-          << SecondsToTimeString(maxsec) << "]";
-    }
-    out << std::endl;
-  }
+  //     // The min or max are out of bounds.
+  //     out << "[" << SecondsToTimeString(minsec) << ","
+  //         << SecondsToTimeString(maxsec) << "]";
+  //   }
+  //   out << std::endl;
+  // }
 }
 std::string Timing::Print() {
   std::stringstream ss;

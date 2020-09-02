@@ -15,14 +15,23 @@
 #include <type_traits>
 
 #include <ros/ros.h>
+#include <ros/console.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <geometry_msgs/TransformStamped.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/PointCloud.h>
 #include <sensor_msgs/Image.h>
 #include <visualization_msgs/Marker.h>
 #include <sensor_msgs/PointCloud.h>
 #include <unordered_set>
+#include <tf/transform_listener.h>
+#include <tf/tf.h>
+#include <tf_conversions/tf_eigen.h>
+#include <eigen_conversions/eigen_msg.h>
+#include <std_msgs/Float64MultiArray.h>
+#include <Eigen/Geometry>
+
 namespace fiesta {
 
 // sensor_msgs::PointCloud2::ConstPtr
@@ -33,7 +42,9 @@ namespace fiesta {
 // geometry_msgs::TransformStamped::ConstPtr
 template<class DepthMsgType, class PoseMsgType>
 class Fiesta {
-private:
+
+//private:
+public:
     Parameters parameters_;
     ESDFMap *esdf_map_;
 #ifdef SIGNED_NEEDED
@@ -44,12 +55,11 @@ private:
 #ifndef PROBABILISTIC
     sensor_msgs::PointCloud2::ConstPtr sync_pc_;
 #endif
-    ros::Publisher slice_pub_, occupancy_pub_, text_pub_;
-    ros::Subscriber transform_sub_, depth_sub_;
+    ros::Publisher slice_pub_, occupancy_pub_, text_pub_, free_voxels_pub_;
+    ros::Subscriber transform_sub_, depth_sub_, ssc_occ_sub_;
     ros::Timer update_mesh_timer_;
     Eigen::Vector3d sync_pos_, raycast_origin_, cur_pos_;
     Eigen::Quaterniond sync_q_;
-
     std::queue<std::tuple<ros::Time, Eigen::Vector3d, Eigen::Quaterniond>> transform_queue_;
     std::queue<DepthMsgType> depth_queue_;
     DepthMsgType sync_depth_;
@@ -57,6 +67,10 @@ private:
     cv::Mat img_[2];
     Eigen::Matrix4d transform_, last_transform_;
     uint image_cnt_ = 0, esdf_cnt_ = 0, tot_ = 0;
+
+    tf::TransformListener tf_listener_;
+    std::vector<Eigen::Vector3d> ssc_pred_poses_;
+
 #ifdef HASH_TABLE
     std::unordered_set<int> set_free_, set_occ_;
 #else
@@ -78,8 +92,10 @@ private:
 
     void PoseCallback(const PoseMsgType &msg);
 
+    void SscCallback(const sensor_msgs::PointCloudConstPtr &msg);
+
     void UpdateEsdfEvent(const ros::TimerEvent & /*event*/);
-public:
+// public:
     Fiesta(ros::NodeHandle node);
     ~Fiesta();
 };
@@ -108,12 +124,52 @@ Fiesta<DepthMsgType, PoseMsgType>::Fiesta(ros::NodeHandle node) {
      set_occ_.resize(esdf_map_->grid_total_size_);
      std::fill(set_free_.begin(), set_free_.end(), 0);
      std::fill(set_occ_.begin(), set_occ_.end(), 0);
+     
+     // Get position of all predicted voxels
+     std::string param_info;
+     if (node.getParam("/ssc/voxel_unit",param_info)){
+          double voxel_unit = std::stod(param_info);
+          if (node.getParam("/ssc/voxel_size_x",param_info)){
+               double voxel_size_x = std::stod(param_info);
+               if (node.getParam("/ssc/voxel_size_y",param_info)){
+                    double voxel_size_y = std::stod(param_info);
+                    if (node.getParam("/ssc/voxel_size_z",param_info)){
+                         double voxel_size_z = std::stod(param_info);
+                         if (node.getParam("/ssc/downscale",param_info)){
+                              double downsample = std::stod(param_info);
+
+                              for (int i = 0; i < voxel_size_x/downsample ; i++){
+                                   for (int j = 0; j <  voxel_size_y/downsample ; j++){
+                                        for (int k = 0; k <  voxel_size_z/downsample ; k++){
+                                             ssc_pred_poses_.push_back(Eigen::Vector3d(i*voxel_unit*downsample, j*voxel_unit*downsample, k*voxel_unit*downsample));
+                                        }
+                                   }
+                              }    
+                         }
+                    
+                    }
+               }
+          }          
+     }
+          
+     
+
+
+     
+
 #endif
      // For Jie Bao
 //     transform_sub_ = node.subscribe("/vins_estimator/camera_pose", 10, &Fiesta::PoseCallback, this);
 //     depth_sub_ = node.subscribe("/camera/depth/image_rect_raw", 10, &Fiesta::DepthCallback, this);
+
     transform_sub_ = node.subscribe("transform", 10, &Fiesta::PoseCallback, this);
     depth_sub_ = node.subscribe("depth", 10, &Fiesta::DepthCallback, this);
+    ssc_occ_sub_ = node.subscribe("/ssc/occ_prediction",10, &Fiesta::SscCallback, this);
+    
+     // message_filters::Subscriber<sensor_msgs::PointCloudConstPtr> ssc_occ_sub_(node, "/ssc/occ_prediction", 10);
+     // message_filters::Subscriber<CameraInfo> pred_origin_sub_(node, "camera_info", 10);
+     // TimeSynchronizer<Image, CameraInfo> sync(image_sub, info_sub, 10);
+     // sync.registerCallback(boost::bind(&callback, _1, _2));
 
      // Cow_and_Lady
      // depth_sub_ = node.subscribe("/camera/depth_registered/points", 1000, PointcloudCallback);
@@ -126,6 +182,7 @@ Fiesta<DepthMsgType, PoseMsgType>::Fiesta(ros::NodeHandle node) {
      slice_pub_ = node.advertise<visualization_msgs::Marker>("ESDFMap/slice", 1, true);
      occupancy_pub_ = node.advertise<sensor_msgs::PointCloud>("ESDFMap/occ_pc", 1, true);
      text_pub_ = node.advertise<visualization_msgs::Marker>("ESDFMap/text", 1, true);
+     free_voxels_pub_ = node.advertise<sensor_msgs::PointCloud>("ESDFMap/free_pc", 1, true);
 
      update_mesh_timer_ =
          node.createTimer(ros::Duration(parameters_.update_esdf_every_n_sec_),
@@ -143,20 +200,23 @@ Fiesta<DepthMsgType, PoseMsgType>::~Fiesta() {
 template<class DepthMsgType, class PoseMsgType>
 void Fiesta<DepthMsgType, PoseMsgType>::Visualization(ESDFMap *esdf_map, bool global_vis, const std::string &text) {
      if (esdf_map!=nullptr) {
-          std::cout << "Visualization" << std::endl;
+          // std::cout << "Visualization" << std::endl;
           if (global_vis)
                esdf_map->SetOriginalRange();
           else
                esdf_map->SetUpdateRange(cur_pos_ - parameters_.radius_, cur_pos_ + parameters_.radius_, false);
 
-          sensor_msgs::PointCloud pc;
-          esdf_map->GetPointCloud(pc, parameters_.vis_lower_bound_, parameters_.vis_upper_bound_);
-          occupancy_pub_.publish(pc);
-
+          sensor_msgs::PointCloud occ_pc;
+          sensor_msgs::PointCloud free_pc;
+          esdf_map->GetPointClouds(occ_pc, free_pc, parameters_.vis_lower_bound_, parameters_.vis_upper_bound_);
+          occupancy_pub_.publish(occ_pc);
+          free_voxels_pub_.publish(free_pc);
           visualization_msgs::Marker slice_marker;
           esdf_map->GetSliceMarker(slice_marker, parameters_.slice_vis_level_, 100,
                                    Eigen::Vector4d(0, 1.0, 0, 1), parameters_.slice_vis_max_dist_);
           slice_pub_.publish(slice_marker);
+
+          
      }
      if (!text.empty()) {
           visualization_msgs::Marker marker;
@@ -210,9 +270,18 @@ void Fiesta<DepthMsgType, PoseMsgType>::RaycastProcess(int i, int part, int tt) 
                continue;
           else if (length > parameters_.max_ray_length_) {
                point = (point - raycast_origin_)/length*parameters_.max_ray_length_ + raycast_origin_;
-               tmp_idx = esdf_map_->SetOccupancy((Eigen::Vector3d) point, 0);
-          } else
-               tmp_idx = esdf_map_->SetOccupancy((Eigen::Vector3d) point, 1);
+               // Eigen::Vector3i vox;
+               // esdf_map_->Pos2Vox(point,vox);
+               // int myid = esdf_map_->Vox2Idx(vox);
+               // esdf_map_->measured_[myid] = 0;
+               tmp_idx = esdf_map_->SetOccupancy((Eigen::Vector3d) point, 0); // measured free
+          } else{
+               // Eigen::Vector3i vox;
+               // esdf_map_->Pos2Vox(point,vox);
+               // int myid = esdf_map_->Vox2Idx(vox);
+               // esdf_map_->measured_[myid] = 1;
+               tmp_idx = esdf_map_->SetOccupancy((Eigen::Vector3d) point, 1); // measured occupied  
+          }
 #ifdef SIGNED_NEEDED
           tmp_idx = inv_esdf_map_->SetOccupancy((Eigen::Vector3d) point, 0);
 #endif
@@ -426,7 +495,8 @@ void Fiesta<DepthMsgType, PoseMsgType>::SynchronizationAndProcess() {
                pcl::fromROSMsg(*tmp, cloud_);
           }
 
-          std::cout << "Pointcloud Size:\t" << cloud_.points.size() << std::endl;
+          // std::cout << "Pointcloud Size:\t" << cloud_.points.size() << std::endl;
+
           if ((int) cloud_.points.size()==0) {
                depth_queue_.pop();
                continue;
@@ -442,6 +512,7 @@ template<class DepthMsgType, class PoseMsgType>
 void Fiesta<DepthMsgType, PoseMsgType>::PoseCallback(const PoseMsgType &msg) {
      Eigen::Vector3d pos;
      Eigen::Quaterniond q;
+     // ROS_WARN("!!!!POSE CALLBACK!!!!");
 
      if constexpr(std::is_same<PoseMsgType, geometry_msgs::PoseStamped::ConstPtr>::value) {
           pos = Eigen::Vector3d(msg->pose.position.x,
@@ -474,8 +545,141 @@ void Fiesta<DepthMsgType, PoseMsgType>::PoseCallback(const PoseMsgType &msg) {
 
 template<class DepthMsgType, class PoseMsgType>
 void Fiesta<DepthMsgType, PoseMsgType>::DepthCallback(const DepthMsgType &depth_map) {
+     // std::cout << "!!!!DEPTH CALLBACK!!!!" << std::endl;
      depth_queue_.push(depth_map);
      SynchronizationAndProcess();
+}
+
+template<class DepthMsgType, class PoseMsgType>
+void Fiesta<DepthMsgType, PoseMsgType>::SscCallback(const sensor_msgs::PointCloudConstPtr &msg) {
+
+     std::cout << "########## SSC CALLBACK ##########"<< std::endl;
+
+     Eigen::Vector3d pos;
+     Eigen::Vector3i vox;
+     int id;
+     int i = 0;
+
+     // Loop over all predicted voxels 
+     for(auto& point : msg->points){
+          int occ = msg->channels[0].values[i];
+          pos[0] = point.x;
+          pos[1] = point.y;
+          pos[2] = point.z;
+          esdf_map_->Pos2Vox(pos, vox);
+          id = esdf_map_->Vox2Idx(vox);
+          int occupy = esdf_map_->Exist(id);
+          
+          // if (occ == 214){  // predicted occupied 
+               
+          //      // If voxel was never measured use data from SSC  
+          //      if ((esdf_map_->distance_buffer_[id] == esdf_map_->undefined_)){
+          //           esdf_map_->SetOccupancy(pos,1);
+          //           esdf_map_->occupancy_buffer_[id] = esdf_map_->Logit(0.95);
+          //      }
+          // }
+
+          // else if((occ == 22) && (esdf_map_->occupancy_buffer_ssc_[id] == esdf_map_->undefined_) && pos[2] < 1.4){ // predicted free and wasn't predicted before 
+
+          //      // Keep track of all predicted voxels
+          //      esdf_map_->occupancy_buffer_ssc_[id] = 0;
+               
+          //      // If voxel was never measured use data from SSC  
+          //      if ((esdf_map_->distance_buffer_[id] == esdf_map_->undefined_)){
+          //           esdf_map_->SetOccupancy(pos,0);
+          //           // esdf_map_->occupancy_from_ssc_[id] = true; 
+          //           // esdf_map_->occupancy_buffer_[id] = 0.0; 
+
+          //           //Update ESDF
+          //           // std::cout << "########## INSERT EMPTY ESDF ##########"<< std::endl;
+          //           // esdf_map_->DeleteQueueEsdf(vox);
+          //      }
+          // }
+          // i++;
+
+          if (occ == 214){  // Occupied 
+               // Keep track of all predicted voxels (we prioritize predicted occupied voxels over free voxels, overwrite free predicted voxels)
+               // esdf_map_->occupancy_buffer_ssc_[id] = 1; 
+               
+               // If voxel was never measured use data from SSC  
+               if ((esdf_map_->distance_buffer_[id] == esdf_map_->undefined_)){
+                    // esdf_map_->occupancy_from_ssc_[id] = true; 
+                    esdf_map_->occupancy_buffer_[id] = esdf_map_->Logit(0.95);
+                    // esdf_map_->UpdateOccupancy(parameters_.global_update_);
+               }
+
+               // Update ESDF if necessary // CHECK LOGIC HERE, ISNT IT SAME CONDITION AS ABOVE ??? 
+               // if (esdf_map_->Exist(id) && !occupy) {
+               //      esdf_map_->InsertQueueEsdf(vox);
+               //      // esdf_map_->UpdateESDF(); GET OUT OF LOOP 
+               // }
+          }
+          i++;
+     }
+
+
+
+
+
+     // tf::StampedTransform transform;
+     // Eigen::Affine3d pred_origin_world_frame;
+
+     // // get prediction origin, useful to infer predicted free voxels 
+     // try{
+     //      tf_listener_.lookupTransform("/world", "/pred_origin", msg->header.stamp, transform);
+     //      tf::transformTFToEigen(transform,pred_origin_world_frame);
+     // }    
+     // catch (tf::TransformException ex){
+     //      ROS_ERROR("%s",ex.what());
+     // }
+
+     // std::vector<Eigen::Vector3d> pred_poses_world_frame;
+
+     // // Todo, implement matrix version to replace for loop 
+     // for(int i = 0; i<ssc_pred_poses_.size();i++){
+     //      pred_poses_world_frame.push_back(pred_origin_world_frame*ssc_pred_poses_[i]);
+     // }
+
+     // UNCOMMENT FROM HERE
+     /////////// Occupied voxels ///////////
+     // Eigen::Vector3d pos;
+     // Eigen::Vector3i vox;
+     // int id;
+     // // Loop over all predicted occupied voxels 
+     // for(auto& point : msg->points){
+     //      pos[0] = point.x;
+     //      pos[1] = point.y;
+     //      pos[2] = point.z;
+
+     //      if ( std::find(pred_poses_world_frame.begin(), pred_poses_world_frame.end(), pos) != pred_poses_world_frame.end() ){
+     //           std::cout << "SUCCESSSUCCESSSUCCESS SUCCESSBB"<< std::endl;
+     //      }
+
+
+     //      esdf_map_->Pos2Vox(pos, vox);
+     //      id = esdf_map_->Vox2Idx(vox);
+     //      int occupy = esdf_map_->Exist(id);
+
+     //      // Keep track of all predicted voxels
+     //      esdf_map_->occupancy_buffer_ssc_[id] = 1;
+          
+     //      // If voxel was never measured use data from SSC  
+     //      if ((esdf_map_->distance_buffer_[id] == esdf_map_->undefined_)){
+     //           esdf_map_->occupancy_from_ssc_[id] = true; 
+     //           esdf_map_->occupancy_buffer_[id] = esdf_map_->Logit(1.0);
+     //      }
+
+     //      // Update ESDF if necessary
+     //      if (esdf_map_->Exist(id) && !occupy) {
+     //           esdf_map_->InsertQueueEsdf(vox);
+     //      } 
+
+     //      if ((esdf_map_->distance_buffer_[id] <= 0.0)	|| (esdf_map_->distance_buffer_[id] == esdf_map_->infinity_)){
+     //           esdf_map_->occupancy_buffer_[id] = esdf_map_->Logit(1.0);
+
+     //      }
+     // }
+     // UNCOMMENT TILL HERE
 }
 
 template<class DepthMsgType, class PoseMsgType>
@@ -499,10 +703,10 @@ void Fiesta<DepthMsgType, PoseMsgType>::UpdateEsdfEvent(const ros::TimerEvent & 
          esdf_map_->SetOccupancy(tmp_pos, 1);
        }
        esdf_map_->SetBack();
-       handlePCTimer.Stop();
+       handlePCTimer.Stop();  
 #endif
      esdf_cnt_++;
-     std::cout << "Running " << esdf_cnt_ << " updates." << std::endl;
+     // std::cout << "Running " << esdf_cnt_ << " updates." << std::endl;
 //    ros::Time t1 = ros::Time::now();
      if (esdf_map_->CheckUpdate()) {
           timing::Timer update_esdf_timer("UpdateESDF");
@@ -518,7 +722,7 @@ void Fiesta<DepthMsgType, PoseMsgType>::UpdateEsdfEvent(const ros::TimerEvent & 
             inv_esdf_map_->UpdateESDF();
 #endif
           update_esdf_timer.Stop();
-          timing::Timing::Print(std::cout);
+          // timing::Timing::Print(std::cout);
      }
 //    ros::Time t2 = ros::Time::now();
 
